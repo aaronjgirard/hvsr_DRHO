@@ -1,0 +1,28 @@
+## macOS
+.DS_Store
+
+## Madagascar build artifacts
+*.rsf
+*.rsf@
+*.vpl
+Fig/
+.sconsign*
+.sconf_temp/
+config.log
+
+## compiled binaries
+sfhvsr
+sfhvsr_gpu
+*.o
+*.so
+
+## IDE / editor
+.vscode/
+.idea/
+*.swp
+
+## original Zenodo source archive (cite, don't redistribute)
+hvsr_code/
+
+## local claude scratch
+.claude/
