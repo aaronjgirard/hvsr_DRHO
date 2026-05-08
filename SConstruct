@@ -1,14 +1,17 @@
 ##############################################################################
-# build sfhvsr (cpu/openmp) and sfhvsr_gpu (cuda/cufft) madagascar mains
+# build sfhvsr / sfhvsr_gpu / sfhvsr_env madagascar mains
 #
 # sources:
-#   Mhvsr.c     -> sfhvsr     (cc  + openmp,  via bldutil targets.c)
-#   Mhvsr_gpu.c -> sfhvsr_gpu (nvcc + cufft,  via custom Command)
+#   Mhvsr.c     -> sfhvsr      (cc  + openmp,  via bldutil targets.c)
+#   Mhvsr_gpu.c -> sfhvsr_gpu  (nvcc + cufft,  via custom Command)
+#   Mhvsr_env.c -> sfhvsr_env  (cc  + openmp,  via bldutil targets.c)
+#                  per-frequency percentile envelope of an HVSR cube
 #
 # usage:
-#   scons                 # build both targets in current directory
+#   scons                 # build all targets in current directory
 #   scons sfhvsr          # cpu only
 #   scons sfhvsr_gpu      # gpu only (requires nvcc on PATH)
+#   scons sfhvsr_env      # envelope helper (cpu/openmp)
 #
 # env vars:
 #   RSFSRC, RSFROOT, NVCC may be set to override defaults
@@ -40,6 +43,7 @@ targets = bldutil.UserSconsTargets()
 ## c mains (cpu/openmp)
 targets.c = '''
 hvsr
+hvsr_env
 '''
 
 ## openmp flags

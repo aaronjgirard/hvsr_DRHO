@@ -13,6 +13,7 @@ config.log
 ## compiled binaries
 sfhvsr
 sfhvsr_gpu
+sfhvsr_env
 *.o
 *.so
 

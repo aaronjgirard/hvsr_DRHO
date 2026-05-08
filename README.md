@@ -32,7 +32,8 @@ RSF-format three-component data.
 |-----------------------|--------------------------------------------------------|
 | `Mhvsr.c`             | OpenMP CPU implementation -> `sfhvsr`                  |
 | `Mhvsr_gpu.c`         | CUDA / cuFFT GPU implementation -> `sfhvsr_gpu`        |
-| `SConstruct`          | scons build script for `sfhvsr` / `sfhvsr_gpu`         |
+| `Mhvsr_env.c`         | per-frequency percentile envelope helper -> `sfhvsr_env` |
+| `SConstruct`          | scons build script for `sfhvsr` / `sfhvsr_gpu` / `sfhvsr_env` |
 | `SConstruct_example`  | example Madagascar workflow (compute + plot per receiver) |
 | `doc/sfhvsr.md`       | user manual for `sfhvsr` / `sfhvsr_gpu`                |
 | `doc/oconnell_2026_workflow_report.md` | description of the original Zenodo IDL pipeline |
