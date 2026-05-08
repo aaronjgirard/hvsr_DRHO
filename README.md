@@ -28,12 +28,13 @@ RSF-format three-component data.
 
 ## What this repository provides
 
-| component        | purpose                                                |
-|------------------|--------------------------------------------------------|
-| `Mhvsr.c`        | OpenMP CPU implementation -> `sfhvsr`                   |
-| `Mhvsr_gpu.c`    | CUDA / cuFFT GPU implementation -> `sfhvsr_gpu`         |
-| `SConstruct`     | Madagascar workflow (compute + plot per receiver)      |
-| `doc/sfhvsr.md`  | user manual for `sfhvsr` / `sfhvsr_gpu`                 |
+| component             | purpose                                                |
+|-----------------------|--------------------------------------------------------|
+| `Mhvsr.c`             | OpenMP CPU implementation -> `sfhvsr`                  |
+| `Mhvsr_gpu.c`         | CUDA / cuFFT GPU implementation -> `sfhvsr_gpu`        |
+| `SConstruct`          | scons build script for `sfhvsr` / `sfhvsr_gpu`         |
+| `SConstruct_example`  | example Madagascar workflow (compute + plot per receiver) |
+| `doc/sfhvsr.md`       | user manual for `sfhvsr` / `sfhvsr_gpu`                |
 | `doc/oconnell_2026_workflow_report.md` | description of the original Zenodo IDL pipeline |
 
 Both executables produce identical output.  Use `sfhvsr` on any system with

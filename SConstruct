@@ -1,98 +1,88 @@
 ##############################################################################
-# HVSR workflow -- multitaper H/V spectral ratio analysis
+# build sfhvsr (cpu/openmp) and sfhvsr_gpu (cuda/cufft) madagascar mains
 #
-# input: 3 RSF files (Z, H1, H2) with axes n1 x n2 x n3
-#   n1 = time samples per window
-#   n2 = receivers
-#   n3 = time windows
+# sources:
+#   Mhvsr.c     -> sfhvsr     (cc  + openmp,  via bldutil targets.c)
+#   Mhvsr_gpu.c -> sfhvsr_gpu (nvcc + cufft,  via custom Command)
 #
-# output: HVSR curves per receiver (combined, H1/V, H2/V, stddev)
+# usage:
+#   scons                 # build both targets in current directory
+#   scons sfhvsr          # cpu only
+#   scons sfhvsr_gpu      # gpu only (requires nvcc on PATH)
 #
-# notes:
-#   - compile cpu:  cc -O2 -fopenmp -I$RSFROOT/include -L$RSFROOT/lib
-#                   -o sfhvsr Mhvsr.c -lrsf -lm
-#   - compile gpu:  nvcc -O2 -I$RSFROOT/include -L$RSFROOT/lib
-#                   -o sfhvsr_gpu Mhvsr_gpu.c -lrsf -lm -lcufft
-#   - set par['exe'] = './sfhvsr_gpu' in par dict to use gpu version
+# env vars:
+#   RSFSRC, RSFROOT, NVCC may be set to override defaults
 ##############################################################################
-from rsf.proj import *
-import os
+import os, sys, shutil, platform, subprocess
 
-par = {
-    'nwin'   : 5,          # number of slepian tapers
-    'npi'    : 3,          # time-bandwidth product
-    'fmin'   : 0.1,        # [Hz] min output frequency
-    'fmax'   : 45.0,       # [Hz] max output frequency
-    'ccwt'   : 'y',        # cc-ar weighting (y/n)
-    'zfile'  : 'data_z',   # vertical component rsf (no .rsf)
-    'h1file' : 'data_n',   # horizontal-1 rsf
-    'h2file' : 'data_e',   # horizontal-2 rsf
-}
+sys.path.append('../../framework')
 
-## set exe='./sfhvsr_gpu' to use gpu version
-par['exe'] = par.get('exe', './sfhvsr')
+try:
+    import bldutil
+    glob_build = True              # scons command launched in RSFSRC
+    srcroot    = '../..'           # cwd is RSFSRC/build/user/jeff
+    Import('env bindir libdir pkgdir')
+    env = env.Clone()
+except:
+    glob_build = False             # scons command launched in the local directory
+    srcroot    = os.environ.get('RSFSRC', '../..')
+    sys.path.append(os.path.join(srcroot, 'framework'))
+    import bldutil
+    env        = bldutil.Debug()   # debugging flags for compilers
+    bindir     = libdir = pkgdir = None
 
-## compute hvsr for all receivers
-Flow('hvsr', [par['zfile'], par['h1file'], par['h2file']], '''
-     %(exe)s h1=${SOURCES[1]} h2=${SOURCES[2]}
-     nwin=%(nwin)d npi=%(npi)d
-     fmin=%(fmin)g fmax=%(fmax)g
-     ccweight=%(ccwt)s verb=1
-     ''' % par)
+    ## librsf.a on this system was built without cblas; rsf.h tries to
+    ## include <cblas.h> unconditionally unless NO_BLAS is defined
+    env.Append(CPPDEFINES=['NO_BLAS'])
 
-## extract individual output components
-for ic, name in enumerate(['hv_combined', 'hv_h1', 'hv_h2', 'hv_stddev']):
-    Flow(name, 'hvsr', 'window n3=1 f3=%d' % ic)
+targets = bldutil.UserSconsTargets()
 
-## combined H/V for all receivers (overlay)
-Plot('hv_combined', '''
-     graph title="Combined H/V (all receivers)"
-     label1="Frequency" unit1="Hz"
-     label2="H/V" plotcol=7
-     ''')
+## c mains (cpu/openmp)
+targets.c = '''
+hvsr
+'''
 
-## mean +/- 1 sigma
-Flow('hv_upper', ['hv_combined', 'hv_stddev'], '''
-     math c=${SOURCES[1]} output="input*exp(c)"
-     ''')
-Flow('hv_lower', ['hv_combined', 'hv_stddev'], '''
-     math c=${SOURCES[1]} output="input*exp(-c)"
-     ''')
+## openmp flags
+if platform.system() == 'Darwin':
+    try:
+        omp_prefix = subprocess.check_output(
+            ['brew', '--prefix', 'libomp']).decode().strip()
+        env.Append(CCFLAGS  =['-Xpreprocessor', '-fopenmp',
+                              '-I%s/include' % omp_prefix],
+                   LINKFLAGS=['-L%s/lib' % omp_prefix, '-lomp'])
+    except Exception:
+        env.Append(CPPDEFINES=['NO_OMP'])
+else:
+    env.Append(CCFLAGS=['-fopenmp'], LINKFLAGS=['-fopenmp'])
 
-## single receiver example (receiver 0)
-Flow('hv_r0', 'hv_combined', 'window n2=1 f2=0')
-Flow('h1v_r0', 'hv_h1', 'window n2=1 f2=0')
-Flow('h2v_r0', 'hv_h2', 'window n2=1 f2=0')
-Flow('std_r0', 'hv_stddev', 'window n2=1 f2=0')
-Flow('up_r0', 'hv_upper', 'window n2=1 f2=0')
-Flow('lo_r0', 'hv_lower', 'window n2=1 f2=0')
+targets.build_all(env, glob_build, srcroot, bindir, libdir, pkgdir)
 
-Plot('hv_r0', '''
-     graph title="Receiver 0: Combined H/V"
-     label1="Frequency" unit1="Hz"
-     label2="H/V" plotcol=7
-     ''')
-Plot('up_r0', '''
-     graph title="" wantaxis=n
-     plotcol=5 dash=1
-     ''')
-Plot('lo_r0', '''
-     graph title="" wantaxis=n
-     plotcol=5 dash=1
-     ''')
-Plot('h1v_r0', '''
-     graph title="" wantaxis=n plotcol=4
-     ''')
-Plot('h2v_r0', '''
-     graph title="" wantaxis=n plotcol=6
-     ''')
+## gpu build via nvcc (Mhvsr_gpu.c -> sfhvsr_gpu)
+## skipped under glob_build because RSF top-level scons handles it differently
+if not glob_build:
+    rsfroot = os.environ.get('RSFROOT', '/usr/local')
+    nvcc    = os.environ.get('NVCC') or shutil.which('nvcc') or 'nvcc'
 
-Result('hvsr_r0', ['hv_r0', 'up_r0', 'lo_r0', 'h1v_r0', 'h2v_r0'], 'Overlay')
+    ## propagate caller PATH so nvcc and helpers it spawns are visible
+    gpu_path = os.environ.get('PATH', env['ENV'].get('PATH', ''))
 
-Result('hvsr_all', 'hv_combined', '''
-       graph title="Combined H/V (all receivers)"
-       label1="Frequency" unit1="Hz"
-       label2="H/V" plotcol=7
-       ''')
+    ## nvcc needs a host g++; if missing on PATH, search common locations
+    ## (rhel gcc-toolset-* ships g++ at /opt/rh/gcc-toolset-N/root/usr/bin)
+    if not shutil.which('g++', path=gpu_path):
+        import glob
+        cands = sorted(glob.glob('/opt/rh/gcc-toolset-*/root/usr/bin'),
+                       reverse=True)
+        if cands:
+            gpu_path = cands[0] + os.pathsep + gpu_path
 
-End()
+    env['ENV']['PATH'] = gpu_path
+
+    ## -DNO_BLAS  : rsf.h skips <cblas.h> when this is defined (matches
+    ##              how librsf.a was built on this system)
+    ## -lgomp     : librsf.a was compiled with openmp -- pull in gomp
+    gpu_cmd = ('%s -O2 -DNO_BLAS -I%s/include -L%s/lib '
+               '-o $TARGET $SOURCE -lrsf -lm -lcufft -lgomp'
+               % (nvcc, rsfroot, rsfroot))
+
+    sfhvsr_gpu = env.Command('sfhvsr_gpu', 'Mhvsr_gpu.c', gpu_cmd)
+    env.Default(sfhvsr_gpu)
