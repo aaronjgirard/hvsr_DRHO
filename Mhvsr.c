@@ -6,10 +6,17 @@
  *   n3 = time windows
  *
  * outputs RSF file with axes nfreq x n2 x 4
- *   n3=0: HVSR(f) = sqrt(H_N(f)^2 + H_E(f)^2) / V(f)  -- Nakamura (1989)
+ *   n3=0: combined HVSR(f), formula chosen by combine= (default Nakamura)
  *   n3=1: H_N/V
  *   n3=2: H_E/V
- *   n3=3: ln-stddev of HVSR across kept windows
+ *   n3=3: ln-stddev of combined HVSR across kept windows
+ *
+ * combine= modes (default nakamura):
+ *   nakamura   sqrt(H_N^2 + H_E^2) / V              -- Nakamura 1989
+ *   geomean    sqrt(H_N * H_E)     / V              -- SESAME / hvsr_lite
+ *   rms        sqrt((H_N^2+H_E^2)/2) / V            -- true horizontal RMS
+ *   max        max(H_N, H_E)       / V              -- polarized sites
+ * Peak frequency is identical for all four modes; only amplitude differs.
  *
  * algorithm: multitaper amplitude spectra per (receiver, window), per-window
  *   HVSR ratio, STA/LTA window rejection, log-mean stack over kept windows,
@@ -262,6 +269,51 @@ static void show_progress(int cur, int tot, time_t t0)
 }
 
 /* ================================================================== */
+/*           helper: horizontal-combine modes for HVSR                */
+/* ================================================================== */
+/* h1v = H_N/V, h2v = H_E/V (already per-receiver log-mean stacked).
+ *
+ *   COMB_NAKAMURA   sqrt(H_N^2 + H_E^2)  / V       Nakamura 1989; default
+ *                                                  matches Garvey et al. 2026
+ *                                                  (in press, TLE).
+ *   COMB_GEOMEAN    sqrt(H_N * H_E)      / V       SESAME 2004; geopsy;
+ *                                                  hvsr_lite.  Robust to
+ *                                                  channel asymmetry.
+ *   COMB_RMS        sqrt((H_N^2+H_E^2)/2)/ V       True horizontal RMS;
+ *                                                  Nakamura / sqrt(2).
+ *   COMB_MAX        max(H_N, H_E)        / V       Polarized-site studies;
+ *                                                  picks the larger channel.
+ *
+ * Peak frequency is the same in all modes; only peak amplitude differs.
+ * See doc/sfhvsr.md for the discussion. */
+#define COMB_NAKAMURA  0
+#define COMB_GEOMEAN   1
+#define COMB_RMS       2
+#define COMB_MAX       3
+
+static int parse_combine(const char *s)
+{
+    if (!s) return COMB_NAKAMURA;
+    if (!strcmp(s, "nakamura")) return COMB_NAKAMURA;
+    if (!strcmp(s, "geomean"))  return COMB_GEOMEAN;
+    if (!strcmp(s, "rms"))      return COMB_RMS;
+    if (!strcmp(s, "max"))      return COMB_MAX;
+    sf_error("unknown combine=%s (expected nakamura, geomean, rms, max)", s);
+    return COMB_NAKAMURA;
+}
+
+static float combine_hv(float h1v, float h2v, int mode)
+{
+    switch (mode) {
+        case COMB_GEOMEAN: return sqrtf(h1v * h2v);
+        case COMB_RMS:     return sqrtf(0.5f * (h1v*h1v + h2v*h2v));
+        case COMB_MAX:     return (h1v > h2v) ? h1v : h2v;
+        case COMB_NAKAMURA:
+        default:           return sqrtf(h1v*h1v + h2v*h2v);
+    }
+}
+
+/* ================================================================== */
 /*               helper: sliding-max STA/LTA on one trace             */
 /* ================================================================== */
 /* returns max( STA/LTA ) over all valid end-positions in x[0..n1-1].
@@ -330,6 +382,7 @@ int main(int argc, char *argv[])
     float    sta_t, lta_t, sthr;
     int      nmin;
     float    kob;
+    int      combine_mode;
     int      sta_n, lta_n;
     int      nf, nfreq, ilo, ihi;
     float    df;
@@ -364,6 +417,7 @@ int main(int argc, char *argv[])
     if (!sf_getfloat("sthr", &sthr))  sthr  = 2.5f;   /* reject above    */
     if (!sf_getint  ("nmin", &nmin))  nmin  = 5;      /* min kept wins   */
     if (!sf_getfloat("kob",  &kob))   kob   = 40.0f;  /* KO bandwidth    */
+    combine_mode = parse_combine(sf_getstring("combine"));
 
     sta_n = (int)(sta_t / d1); if (sta_n < 1)         sta_n = 1;
     lta_n = (int)(lta_t / d1); if (lta_n <= sta_n)    lta_n = sta_n + 1;
@@ -382,8 +436,11 @@ int main(int argc, char *argv[])
         sf_warning("sfhvsr: n1=%d n2=%d n3=%d d1=%g", n1, n2, n3, d1);
         sf_warning("  nwin=%d npi=%d fmin=%g fmax=%g", nwin, npi, fmin, fmax);
         sf_warning("  nf=%d ilo=%d ihi=%d nfreq=%d df=%g", nf, ilo, ihi, nfreq, df);
-        sf_warning("  sta=%gs lta=%gs (sta_n=%d lta_n=%d) sthr=%g nmin=%d kob=%g",
-                   sta_t, lta_t, sta_n, lta_n, sthr, nmin, kob);
+        sf_warning("  sta=%gs lta=%gs (sta_n=%d lta_n=%d) sthr=%g nmin=%d kob=%g combine=%s",
+                   sta_t, lta_t, sta_n, lta_n, sthr, nmin, kob,
+                   combine_mode==COMB_NAKAMURA?"nakamura":
+                   combine_mode==COMB_GEOMEAN ?"geomean" :
+                   combine_mode==COMB_RMS     ?"rms"     :"max");
     }
 
     /* setup output: nfreq x n2 x 4 */
@@ -555,19 +612,21 @@ int main(int argc, char *argv[])
             ko_smooth(hovcc1, nfreq, df, (float)(ilo * df), kob);
             ko_smooth(hovcc2, nfreq, df, (float)(ilo * df), kob);
 
-            /* HVSR(f) = sqrt(H_N^2 + H_E^2) / V    (Nakamura 1989;
-             * matches Garvey, Girard, Shragge & Yuan 2026, in press, TLE) */
+            /* Combine horizontals per `combine_mode` (default Nakamura
+             * 1989, matches Garvey, Girard, Shragge & Yuan 2026 in press,
+             * TLE).  See parse_combine() above for the four modes. */
             for (ic = 0; ic < nfreq; ic++)
-                combined[ic] = sqrtf(hovcc1[ic] * hovcc1[ic] +
-                                     hovcc2[ic] * hovcc2[ic]);
+                combined[ic] = combine_hv(hovcc1[ic], hovcc2[ic],
+                                          combine_mode);
             if (nvalid > 1) {
                 for (ic = 0; ic < nfreq; ic++) {
                     double mn = log((double)combined[ic] + 1e-30);
                     double s2 = 0.0;
                     for (iw = 0; iw < n3; iw++) {
                         if (!valid[iw]) continue;
-                        float c = sqrtf(hov[(iw*nfreq+ic)*2+0]*hov[(iw*nfreq+ic)*2+0] +
-                                        hov[(iw*nfreq+ic)*2+1]*hov[(iw*nfreq+ic)*2+1]);
+                        float c = combine_hv(hov[(iw*nfreq+ic)*2+0],
+                                             hov[(iw*nfreq+ic)*2+1],
+                                             combine_mode);
                         double lnc = log((double)c + 1e-30);
                         s2 += (lnc - mn) * (lnc - mn);
                     }

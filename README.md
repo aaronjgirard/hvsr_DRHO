@@ -73,16 +73,52 @@ equal length, are processed as follows:
    windows, log-frequency smoothed with the Konno-Ohmachi (1998) operator
    $W(f, f_c) = \left(\frac{\sin(b\,\log_{10}(f/f_c))}{b\,\log_{10}(f/f_c)}\right)^4$
    (default bandwidth $b = 40$; `kob=0` disables).  HVSR is then evaluated
-   from the smoothed components as the quadratic mean of the two horizontal
-   spectra divided by the vertical (Nakamura, 1989):
-
-   $$\mathrm{HVSR}(f) \;=\; \frac{\sqrt{H_N(f)^2 + H_E(f)^2}}{V(f)}$$
-
-   Ln-standard deviation across the kept windows is reported as uncertainty.
-   This formula choice matches Garvey, Girard, Shragge, & Yuan (2026,
-   *The Leading Edge*, in press).
+   from the smoothed components.  The horizontal-combine formula is
+   selectable via the `combine=` parameter (default `nakamura`); see the
+   next section for the four supported modes.  Ln-standard deviation across
+   the kept windows is reported as uncertainty.
 
 See `doc/sfhvsr.md` for the full algorithm, parameter list, and examples.
+
+---
+
+## Horizontal-combine formula (`combine=`)
+
+The two horizontal Fourier amplitude spectra $H_N(f)$ and $H_E(f)$ can be
+combined into a single HVSR curve in several ways.  `sfhvsr` exposes four
+modes; the choice changes the peak amplitude but **not** the peak frequency
+$f_0$ — that is identical for all four.
+
+| `combine=` | Formula | Notes |
+|---|---|---|
+| `nakamura` (default) | $\dfrac{\sqrt{H_N^2 + H_E^2}}{V}$ | Nakamura (1989); used by Garvey, Girard, Shragge & Yuan (2026, *TLE*, in press).  Dominated by the larger horizontal component when the two are unequal. |
+| `geomean` | $\dfrac{\sqrt{H_N\,H_E}}{V}$ | SESAME (2004) standard; used by geopsy and somar `hvsr_lite`.  Robust to channel asymmetry — if one horizontal has a different gain or different ambient-noise floor, the geometric mean masks the asymmetry. |
+| `rms` | $\dfrac{\sqrt{(H_N^2 + H_E^2)/2}}{V}$ | True horizontal RMS; physically the magnitude of the horizontal motion vector divided by $\sqrt 2$.  Equals `nakamura`$/\sqrt 2$. |
+| `max` | $\dfrac{\max(H_N, H_E)}{V}$ | Picks the larger channel.  Useful for highly polarized sites (basin edges, instrument tilt). |
+
+### How the choices differ in practice
+
+- When $H_N \approx H_E$ (most isotropic ambient-noise sites): `nakamura`
+  $=\sqrt 2 \cdot$`geomean`. The two curves are a constant $\sqrt 2 \approx 1.41$
+  apart at all frequencies.
+- When $H_N \gg H_E$ (polarized motion): `nakamura` and `max` track the
+  dominant component; `geomean` is pulled down by the quieter channel.
+- For *resonance frequency* extraction, any mode works — the location of
+  $f_0$ is invariant.  Only the *amplification* estimate at $f_0$ changes.
+
+### Choosing a mode
+
+| If you want… | use… |
+|---|---|
+| To reproduce Garvey, Girard, Shragge & Yuan (2026) and Nakamura (1989) | `nakamura` |
+| To compare against geopsy / SESAME-compliant published HVSR catalogs | `geomean` |
+| A physically interpretable horizontal-motion RMS | `rms` |
+| Worst-case polarized amplification (e.g. basin-edge sites) | `max` |
+
+If you are comparing this code against a hvsr_lite (somar / geopsy)
+reference and see a constant $\sim 1.5\times$ offset, that is the expected
+signature of `nakamura` vs `geomean`; switch to `combine=geomean` for a
+like-for-like comparison.
 
 ---
 
