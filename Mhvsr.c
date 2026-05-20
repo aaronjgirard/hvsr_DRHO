@@ -6,13 +6,21 @@
  *   n3 = time windows
  *
  * outputs RSF file with axes nfreq x n2 x 4
- *   n3=0: combined H/V = sqrt(H1/V^2 + H2/V^2)
- *   n3=1: H1/V
- *   n3=2: H2/V
- *   n3=3: ln-stddev of combined H/V
+ *   n3=0: HVSR(f) = sqrt(H_N(f)^2 + H_E(f)^2) / V(f)  -- Nakamura (1989)
+ *   n3=1: H_N/V
+ *   n3=2: H_E/V
+ *   n3=3: ln-stddev of HVSR across kept windows
  *
- * algorithm: O'Connell & Girard (2026) -- multitaper HVSR with
- *   cross-correlation and amplitude-ratio weighting
+ * algorithm: multitaper amplitude spectra per (receiver, window), per-window
+ *   HVSR ratio, STA/LTA window rejection, log-mean stack over kept windows,
+ *   Konno-Ohmachi log-frequency smoothing of the receiver curves.
+ *
+ * references:
+ *   Nakamura, Y. (1989). A method for dynamic characteristics estimation
+ *     of subsurface using microtremor on the ground surface.  QR Railway
+ *     Tech. Res. Inst. 30(1):25-33.
+ *   Garvey, S., Girard, A.J., Shragge, J., Yuan, S. (2026, in press).
+ *     [Ocelot ambient-noise / HVSR companion paper], The Leading Edge.
  *
  * parallelism: OpenMP over receivers (n2 axis)
  *
@@ -237,17 +245,78 @@ static float median_float(float *arr, int n)
 /* ================================================================== */
 /*                    progress bar                                    */
 /* ================================================================== */
+#define PROG_BAR_W 25
 static void show_progress(int cur, int tot, time_t t0)
 {
     int    pct = (int)(100.0 * cur / tot);
-    int    bar = pct / 2;
+    int    bar = (pct * PROG_BAR_W) / 100;
     double sec = difftime(time(NULL), t0);
     int    i;
+    double rate = (cur > 0) ? sec / (double)cur : 0.0;  /* s/rcv */
     fprintf(stderr, "\r  [");
-    for (i = 0; i < 50; i++) fprintf(stderr, i < bar ? "#" : "-");
-    fprintf(stderr, "] %3d%% (%d/%d) %.0fs", pct, cur, tot, sec);
+    for (i = 0; i < PROG_BAR_W; i++) fprintf(stderr, i < bar ? "#" : "-");
+    fprintf(stderr, "] %3d%% (%d/%d) %.0fs %.1fs/rcv\033[K",
+            pct, cur, tot, sec, rate);
     if (cur == tot) fprintf(stderr, "\n");
     fflush(stderr);
+}
+
+/* ================================================================== */
+/*               helper: sliding-max STA/LTA on one trace             */
+/* ================================================================== */
+/* returns max( STA/LTA ) over all valid end-positions in x[0..n1-1].
+ * empty / zero traces return +inf so the caller rejects them.        */
+static float win_stalta_max(const float *x, int n1, int sta_n, int lta_n)
+{
+    if (n1 < lta_n) return 1.0f / 0.0f;
+    double *csum = (double *)malloc((size_t)(n1 + 1) * sizeof(double));
+    csum[0] = 0.0;
+    for (int i = 0; i < n1; i++) csum[i + 1] = csum[i] + fabs((double)x[i]);
+    float rmax = 0.0f;
+    int   bad  = 0;
+    for (int i = lta_n; i <= n1; i++) {
+        double lta = (csum[i] - csum[i - lta_n]) / (double)lta_n;
+        double sta = (csum[i] - csum[i - sta_n]) / (double)sta_n;
+        if (lta < 1e-12) { bad = 1; break; }
+        float r = (float)(sta / lta);
+        if (r > rmax) rmax = r;
+    }
+    free(csum);
+    return bad ? 1.0f / 0.0f : rmax;
+}
+
+/* ================================================================== */
+/*               helper: Konno-Ohmachi log-freq smoothing             */
+/* ================================================================== */
+/* in-place log-frequency smoothing with bandwidth coefficient b.
+ *   W(f, fc) = ( sin(b log10(f/fc)) / (b log10(f/fc)) )^4
+ * b <= 0 disables smoothing.  freq axis is fc[ic] = o1 + ic*df.       */
+static void ko_smooth(float *y, int nfreq, float df, float o1, float b)
+{
+    if (b <= 0.0f) return;
+    float *ys = (float *)malloc((size_t)nfreq * sizeof(float));
+    for (int ic = 0; ic < nfreq; ic++) {
+        double fc = (double)o1 + (double)ic * (double)df;
+        if (fc <= 0.0) { ys[ic] = y[ic]; continue; }
+        double wsum = 0.0, ysum = 0.0;
+        for (int jc = 0; jc < nfreq; jc++) {
+            double f = (double)o1 + (double)jc * (double)df;
+            if (f <= 0.0) continue;
+            double x = (double)b * log10(f / fc);
+            double w;
+            if (fabs(x) < 1e-6) {
+                w = 1.0;
+            } else {
+                double s = sin(x) / x;
+                w = s * s * s * s;
+            }
+            wsum += w;
+            ysum += w * (double)y[jc];
+        }
+        ys[ic] = (wsum > 0.0) ? (float)(ysum / wsum) : y[ic];
+    }
+    memcpy(y, ys, (size_t)nfreq * sizeof(float));
+    free(ys);
 }
 
 /* ================================================================== */
@@ -258,6 +327,10 @@ int main(int argc, char *argv[])
     sf_file  fz, fh1, fh2, fout;
     int      n1, n2, n3, nwin, npi, verb;
     float    d1, fmin, fmax;
+    float    sta_t, lta_t, sthr;
+    int      nmin;
+    float    kob;
+    int      sta_n, lta_n;
     int      nf, nfreq, ilo, ihi;
     float    df;
     double  *tapers, *lam;
@@ -285,7 +358,16 @@ int main(int argc, char *argv[])
     if (!sf_getfloat("fmin", &fmin)) fmin = 0.1f;
     if (!sf_getfloat("fmax", &fmax)) fmax = 45.0f;
     if (!sf_getint("verb", &verb)) verb = 1;
-    if (!sf_getbool("ccweight", &ccweight)) ccweight = true;
+    if (!sf_getbool("ccweight", &ccweight)) ccweight = true;  /* deprecated */
+    if (!sf_getfloat("sta",  &sta_t)) sta_t = 1.0f;   /* [s] STA window  */
+    if (!sf_getfloat("lta",  &lta_t)) lta_t = 10.0f;  /* [s] LTA window  */
+    if (!sf_getfloat("sthr", &sthr))  sthr  = 2.5f;   /* reject above    */
+    if (!sf_getint  ("nmin", &nmin))  nmin  = 5;      /* min kept wins   */
+    if (!sf_getfloat("kob",  &kob))   kob   = 40.0f;  /* KO bandwidth    */
+
+    sta_n = (int)(sta_t / d1); if (sta_n < 1)         sta_n = 1;
+    lta_n = (int)(lta_t / d1); if (lta_n <= sta_n)    lta_n = sta_n + 1;
+    if (lta_n > n1) lta_n = n1;
 
     /* frequency axis */
     nf = n1 / 2 + 1;
@@ -300,6 +382,8 @@ int main(int argc, char *argv[])
         sf_warning("sfhvsr: n1=%d n2=%d n3=%d d1=%g", n1, n2, n3, d1);
         sf_warning("  nwin=%d npi=%d fmin=%g fmax=%g", nwin, npi, fmin, fmax);
         sf_warning("  nf=%d ilo=%d ihi=%d nfreq=%d df=%g", nf, ilo, ihi, nfreq, df);
+        sf_warning("  sta=%gs lta=%gs (sta_n=%d lta_n=%d) sthr=%g nmin=%d kob=%g",
+                   sta_t, lta_t, sta_n, lta_n, sthr, nmin, kob);
     }
 
     /* setup output: nfreq x n2 x 4 */
@@ -325,11 +409,14 @@ int main(int argc, char *argv[])
     float *dh1 = sf_floatalloc(slicesz);
     float *dh2 = sf_floatalloc(slicesz);
 
+    if (verb) sf_warning("  reading 3 components, %.1f GB total (may take a minute) ...",
+                         3.0 * (double)slicesz * 4.0 / (1024.0*1024.0*1024.0));
+    time_t t_read = time(NULL);
     sf_floatread(dz,  slicesz, fz);
     sf_floatread(dh1, slicesz, fh1);
     sf_floatread(dh2, slicesz, fh2);
-
-    if (verb) sf_warning("  data read: %.1f MB per component",
+    if (verb) sf_warning("  data read in %.1f s (%.1f MB per component)",
+                         difftime(time(NULL), t_read),
                          slicesz * 4.0 / 1048576.0);
 
     /* allocate output: 4 x n2 x nfreq */
@@ -422,139 +509,76 @@ int main(int argc, char *argv[])
         } /* end windows */
 
         /* ---------------------------------------------------------- */
-        /*  window weighting and stacking                             */
+        /*  per-window STA/LTA rejection (matches hvsr_lite, b=2.5)   */
         /* ---------------------------------------------------------- */
-        float *hovcc1  = (float *)calloc(nfreq, sizeof(float));
-        float *hovcc2  = (float *)calloc(nfreq, sizeof(float));
-        float *combined = (float *)malloc(nfreq * sizeof(float));
-        float *lnstd    = (float *)calloc(nfreq, sizeof(float));
-
-        if (n3 <= 1) {
-            /* single window: just copy */
-            for (ic = 0; ic < nfreq; ic++) {
-                hovcc1[ic]   = hov[ic * 2 + 0];
-                hovcc2[ic]   = hov[ic * 2 + 1];
-            }
-
-        } else if (!ccweight) {
-            /* uniform ln-mean across windows (no CC/AR weighting) */
-            for (ic = 0; ic < nfreq; ic++) {
-                double s1 = 0.0, s2 = 0.0;
-                for (iw = 0; iw < n3; iw++) {
-                    float v1 = hov[(iw * nfreq + ic) * 2 + 0];
-                    float v2 = hov[(iw * nfreq + ic) * 2 + 1];
-                    s1 += log((double)v1 + 1e-30);
-                    s2 += log((double)v2 + 1e-30);
-                }
-                hovcc1[ic] = (float)exp(s1 / n3);
-                hovcc2[ic] = (float)exp(s2 / n3);
-            }
-
-        } else {
-            /* CC-AR weighted ln-mean (O'Connell & Girard 2026) */
-
-            /* step 1: raw ln-mean across windows for h1/v */
-            float *rawlm = (float *)calloc(nfreq, sizeof(float));
-            for (ic = 0; ic < nfreq; ic++) {
-                double s = 0.0;
-                for (iw = 0; iw < n3; iw++)
-                    s += log((double)hov[(iw * nfreq + ic) * 2 + 0] + 1e-30);
-                rawlm[ic] = (float)exp(s / n3);
-            }
-
-            /* step 2: reference freq for normalization */
-            int iref = (nfreq > 8) ? 8 : 0;
-            float rval = rawlm[iref];
-            if (rval < 1e-20f) rval = 1e-20f;
-
-            float *href = (float *)malloc(nfreq * sizeof(float));
-            for (ic = 0; ic < nfreq; ic++)
-                href[ic] = rawlm[ic] / rval;
-
-            /* step 3: CC weights per window */
-            float *wts = (float *)malloc(n3 * sizeof(float));
-            float  wmin = 1e30f, wmax = -1e30f;
-
-            for (iw = 0; iw < n3; iw++) {
-                float wr = hov[(iw * nfreq + iref) * 2 + 0];
-                if (wr < 1e-20f) wr = 1e-20f;
-
-                double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
-                for (ic = 0; ic < nfreq; ic++) {
-                    double a = (double)href[ic];
-                    double b = (double)hov[(iw * nfreq + ic) * 2 + 0] / wr;
-                    sx  += a;   sy  += b;
-                    sxx += a*a; syy += b*b;
-                    sxy += a*b;
-                }
-                double num = (double)nfreq * sxy - sx * sy;
-                double dn2 = ((double)nfreq * sxx - sx*sx) *
-                             ((double)nfreq * syy - sy*sy);
-                double den = (dn2 > 0.0) ? sqrt(dn2) : 0.0;
-                wts[iw] = (den > 1e-30) ? (float)(num / den) : 1.0f;
-                if (wts[iw] < wmin) wmin = wts[iw];
-                if (wts[iw] > wmax) wmax = wts[iw];
-            }
-
-            /* step 4: AR weights (high-freq / low-freq ratio) */
-            /* find freq indices for 1-2 Hz and 5-10 Hz bands */
-            float lobot = 1.0f, lotop = 2.0f;
-            float hibot = 5.0f, hitop = 10.0f;
-            for (iw = 0; iw < n3; iw++) {
-                float mlo = 0.0f, mhi = 0.0f;
-                int   nlo = 0, nhi = 0;
-                for (ic = 0; ic < nfreq; ic++) {
-                    float f = (ic + ilo) * df;
-                    float v = hov[(iw * nfreq + ic) * 2 + 0];
-                    if (f >= lobot && f <= lotop) { mlo += v; nlo++; }
-                    if (f >= hibot && f <= hitop) { mhi += v; nhi++; }
-                }
-                if (nlo > 0) mlo /= nlo; else mlo = 1.0f;
-                if (nhi > 0) mhi /= nhi; else mhi = 1.0f;
-                if (mlo < 1e-20f) mlo = 1e-20f;
-                float ar = mhi / mlo;
-                /* combine CC and AR: w = cc_w / ar^2 */
-                float ccw = wts[iw] - wmin + 0.01f;
-                wts[iw] = ccw / (ar * ar + 1e-20f);
-            }
-
-            /* normalize weights */
-            float wsum = 0.0f;
-            for (iw = 0; iw < n3; iw++) wsum += wts[iw];
-            if (wsum < 1e-30f) wsum = 1.0f;
-            for (iw = 0; iw < n3; iw++) wts[iw] /= wsum;
-
-            /* step 5: weighted ln-mean for both components */
-            for (ic = 0; ic < nfreq; ic++) {
-                double s1 = 0.0, s2 = 0.0;
-                for (iw = 0; iw < n3; iw++) {
-                    s1 += wts[iw] * log((double)hov[(iw*nfreq+ic)*2+0] + 1e-30);
-                    s2 += wts[iw] * log((double)hov[(iw*nfreq+ic)*2+1] + 1e-30);
-                }
-                hovcc1[ic] = (float)exp(s1);
-                hovcc2[ic] = (float)exp(s2);
-            }
-
-            free(rawlm); free(href); free(wts);
+        int *valid  = (int *)malloc((size_t)n3 * sizeof(int));
+        int  nvalid = 0;
+        for (iw = 0; iw < n3; iw++) {
+            size_t didx = (size_t)n1 * ((size_t)ir + (size_t)n2 * (size_t)iw);
+            float rz = win_stalta_max(dz  + didx, n1, sta_n, lta_n);
+            float r1 = win_stalta_max(dh1 + didx, n1, sta_n, lta_n);
+            float r2 = win_stalta_max(dh2 + didx, n1, sta_n, lta_n);
+            float rmax = (rz > r1) ? rz : r1;
+            if (r2 > rmax) rmax = r2;
+            valid[iw] = (isfinite(rmax) && rmax <= sthr) ? 1 : 0;
+            nvalid += valid[iw];
         }
 
-        /* combined H/V and ln-stddev */
-        for (ic = 0; ic < nfreq; ic++)
-            combined[ic] = sqrtf(hovcc1[ic] * hovcc1[ic] +
-                                 hovcc2[ic] * hovcc2[ic]);
+        /* ---------------------------------------------------------- */
+        /*  plain ln-mean over kept windows                           */
+        /* ---------------------------------------------------------- */
+        float *hovcc1   = (float *)calloc(nfreq, sizeof(float));
+        float *hovcc2   = (float *)calloc(nfreq, sizeof(float));
+        float *combined = (float *)calloc(nfreq, sizeof(float));
+        float *lnstd    = (float *)calloc(nfreq, sizeof(float));
 
-        if (n3 > 1) {
+        if (nvalid < nmin) {
+            if (verb) fprintf(stderr, "\n");
+            sf_warning("  rcv %d: only %d/%d windows kept (nmin=%d sthr=%g) -- zero",
+                       ir, nvalid, n3, nmin, sthr);
+        } else {
             for (ic = 0; ic < nfreq; ic++) {
-                double mn = log((double)combined[ic] + 1e-30);
-                double s2 = 0.0;
+                double s1 = 0.0, s2 = 0.0;
                 for (iw = 0; iw < n3; iw++) {
-                    float c = sqrtf(hov[(iw*nfreq+ic)*2+0] * hov[(iw*nfreq+ic)*2+0] +
-                                    hov[(iw*nfreq+ic)*2+1] * hov[(iw*nfreq+ic)*2+1]);
-                    double lnc = log((double)c + 1e-30);
-                    s2 += (lnc - mn) * (lnc - mn);
+                    if (!valid[iw]) continue;
+                    s1 += log((double)hov[(iw*nfreq+ic)*2+0] + 1e-30);
+                    s2 += log((double)hov[(iw*nfreq+ic)*2+1] + 1e-30);
                 }
-                lnstd[ic] = (float)sqrt(s2 / n3);
+                hovcc1[ic] = (float)exp(s1 / (double)nvalid);
+                hovcc2[ic] = (float)exp(s2 / (double)nvalid);
             }
+
+            /* Konno-Ohmachi log-frequency smoothing of the receiver curves
+             * (kob<=0 disables). Smooth h1/v and h2/v individually, then
+             * recompute combined from smoothed components. lnstd is smoothed
+             * separately for output continuity. */
+            ko_smooth(hovcc1, nfreq, df, (float)(ilo * df), kob);
+            ko_smooth(hovcc2, nfreq, df, (float)(ilo * df), kob);
+
+            /* HVSR(f) = sqrt(H_N^2 + H_E^2) / V    (Nakamura 1989;
+             * matches Garvey, Girard, Shragge & Yuan 2026, in press, TLE) */
+            for (ic = 0; ic < nfreq; ic++)
+                combined[ic] = sqrtf(hovcc1[ic] * hovcc1[ic] +
+                                     hovcc2[ic] * hovcc2[ic]);
+            if (nvalid > 1) {
+                for (ic = 0; ic < nfreq; ic++) {
+                    double mn = log((double)combined[ic] + 1e-30);
+                    double s2 = 0.0;
+                    for (iw = 0; iw < n3; iw++) {
+                        if (!valid[iw]) continue;
+                        float c = sqrtf(hov[(iw*nfreq+ic)*2+0]*hov[(iw*nfreq+ic)*2+0] +
+                                        hov[(iw*nfreq+ic)*2+1]*hov[(iw*nfreq+ic)*2+1]);
+                        double lnc = log((double)c + 1e-30);
+                        s2 += (lnc - mn) * (lnc - mn);
+                    }
+                    lnstd[ic] = (float)sqrt(s2 / (double)nvalid);
+                }
+                ko_smooth(lnstd, nfreq, df, (float)(ilo * df), kob);
+            }
+        }
+        if (verb && (ir % 20 == 0 || ir == n2 - 1)) {
+            fprintf(stderr, "\n");
+            sf_warning("  rcv %d: %d/%d windows kept", ir, nvalid, n3);
         }
 
         /* ---------------------------------------------------------- */
@@ -572,7 +596,7 @@ int main(int argc, char *argv[])
         kiss_fftr_free(fft_cfg);
         free(tbuf); free(fbuf);
         free(spec_z); free(spec_h1); free(spec_h2);
-        free(hov); free(hovcc1); free(hovcc2);
+        free(hov); free(hovcc1); free(hovcc2); free(valid);
         free(combined); free(lnstd);
 
         if (verb) {

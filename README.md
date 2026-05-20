@@ -1,8 +1,8 @@
 # hvsr_DRHO
 
 A portable C / Madagascar reimplementation of the multitaper H/V spectral
-ratio (HVSR) workflow with cross-correlation and amplitude-ratio (CC-AR)
-window weighting.
+ratio (HVSR) workflow with per-window STA/LTA rejection and log-mean
+stacking across the kept windows.
 
 ## Attribution
 
@@ -58,12 +58,29 @@ equal length, are processed as follows:
    $$\frac{H}{V}(f) = \exp\!\left(\frac{1}{K}\sum_{k=0}^{K-1}
    \ln\frac{|H_k(f)|}{|V_k(f)|}\right)$$
 
-4. CC-AR weighting (O'Connell & Girard, 2026) combines windows: each
-   window is weighted by its cross-correlation with the global ln-mean
-   reference and inversely by an amplitude-ratio diagnostic, so noisy or
-   unrepresentative windows contribute less to the receiver-level estimate.
-5. The combined H/V is $\sqrt{(H_1/V)^2 + (H_2/V)^2}$, with ln-standard
-   deviation reported as uncertainty.
+4. Each window is screened by a sliding-maximum STA/LTA detector on all
+   three components (default $\mathrm{STA}=1\,\mathrm{s}$,
+   $\mathrm{LTA}=10\,\mathrm{s}$, threshold $2.5$).  Windows whose maximum
+   STA/LTA ratio on any component exceeds the threshold -- transients,
+   spikes, data gaps -- are dropped.  Receivers with fewer than `nmin`
+   surviving windows (default 5) are zeroed; this catches stations with
+   dead vertical channels whose few accepted windows would otherwise
+   produce a spurious monotonic ramp.  This replaces the earlier CC-AR
+   weighting, which was unstable for windows whose high-frequency band
+   floored out (a single empty window could dominate the weighted mean and
+   collapse the receiver-level estimate to zero).
+5. The receiver-level $H_N/V$ and $H_E/V$ are plain log-means over the kept
+   windows, log-frequency smoothed with the Konno-Ohmachi (1998) operator
+   $W(f, f_c) = \left(\frac{\sin(b\,\log_{10}(f/f_c))}{b\,\log_{10}(f/f_c)}\right)^4$
+   (default bandwidth $b = 40$; `kob=0` disables).  HVSR is then evaluated
+   from the smoothed components as the quadratic mean of the two horizontal
+   spectra divided by the vertical (Nakamura, 1989):
+
+   $$\mathrm{HVSR}(f) \;=\; \frac{\sqrt{H_N(f)^2 + H_E(f)^2}}{V(f)}$$
+
+   Ln-standard deviation across the kept windows is reported as uncertainty.
+   This formula choice matches Garvey, Girard, Shragge, & Yuan (2026,
+   *The Leading Edge*, in press).
 
 See `doc/sfhvsr.md` for the full algorithm, parameter list, and examples.
 
@@ -108,8 +125,12 @@ nvcc -O2 \
 
 ```bash
 sfhvsr < data_z.rsf h1=data_n.rsf h2=data_e.rsf > hvsr.rsf \
-   nwin=5 npi=3 fmin=0.1 fmax=45.0 ccweight=y
+   nwin=5 npi=3 fmin=0.1 fmax=45.0 \
+   sta=1.0 lta=10.0 sthr=2.5 nmin=5 kob=40
 ```
+
+The `ccweight=` flag is still accepted for backward compatibility but is
+ignored; stacking is always a plain log-mean over windows that pass STA/LTA.
 
 A full SConstruct workflow that computes HVSR and produces per-receiver
 plots is provided in `SConstruct`.  Switch between CPU and GPU by setting
@@ -119,6 +140,17 @@ plots is provided in `SConstruct`.  Switch between CPU and GPU by setting
 
 ## References
 
+- Nakamura, Y. (1989). A method for dynamic characteristics estimation
+  of subsurface using microtremor on the ground surface.  *Quarterly
+  Report of the Railway Technical Research Institute*, 30(1):25-33.
+  *(HVSR formula used here: $\mathrm{HVSR}(f) = \sqrt{H_N^2 + H_E^2} / V$.)*
+- Garvey, S., Girard, A.J., Shragge, J., and Yuan, S. (2026, in press).
+  [Ocelot ambient-noise / HVSR companion paper]. *The Leading Edge*.
+  *(Methodology reference for the Ocelot HVSR processing chain.)*
+- Konno, K. and Ohmachi, T. (1998). Ground-motion characteristics
+  estimated from spectral ratio between horizontal and vertical
+  components of microtremor. *Bulletin of the Seismological Society of
+  America*, 88(1):228-241.
 - O'Connell, D. (2026). HVSR code for 2023 Kilauea Horizontal-Component
   Signal/Noise Assessment of a Large Three-Component Nodal Array
   [software]. Zenodo. <https://doi.org/10.5281/zenodo.19929263>
