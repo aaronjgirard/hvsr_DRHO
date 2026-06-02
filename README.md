@@ -91,7 +91,7 @@ $f_0$ — that is identical for all four.
 
 | `combine=` | Formula | Notes |
 |---|---|---|
-| `nakamura` (default) | $\dfrac{\sqrt{H_N^2 + H_E^2}}{V}$ | Nakamura (1989); used by Garvey, Girard, Shragge & Yuan (2026, *TLE*, in press).  Dominated by the larger horizontal component when the two are unequal. |
+| `nakamura` (default) | $\dfrac{\sqrt{H_N^2 + H_E^2}}{V}$ | Nakamura (1989).  Dominated by the larger horizontal component when the two are unequal. |
 | `geomean` | $\dfrac{\sqrt{H_N\,H_E}}{V}$ | SESAME (2004) standard; used by geopsy and somar `hvsr_lite`.  Robust to channel asymmetry — if one horizontal has a different gain or different ambient-noise floor, the geometric mean masks the asymmetry. |
 | `rms` | $\dfrac{\sqrt{(H_N^2 + H_E^2)/2}}{V}$ | True horizontal RMS; physically the magnitude of the horizontal motion vector divided by $\sqrt 2$.  Equals `nakamura`$/\sqrt 2$. |
 | `max` | $\dfrac{\max(H_N, H_E)}{V}$ | Picks the larger channel.  Useful for highly polarized sites (basin edges, instrument tilt). |
@@ -110,7 +110,7 @@ $f_0$ — that is identical for all four.
 
 | If you want… | use… |
 |---|---|
-| To reproduce Garvey, Girard, Shragge & Yuan (2026) and Nakamura (1989) | `nakamura` |
+| To reproduce Nakamura (1989) | `nakamura` |
 | To compare against geopsy / SESAME-compliant published HVSR catalogs | `geomean` |
 | A physically interpretable horizontal-motion RMS | `rms` |
 | Worst-case polarized amplification (e.g. basin-edge sites) | `max` |
@@ -180,9 +180,6 @@ plots is provided in `SConstruct`.  Switch between CPU and GPU by setting
   of subsurface using microtremor on the ground surface.  *Quarterly
   Report of the Railway Technical Research Institute*, 30(1):25-33.
   *(HVSR formula used here: $\mathrm{HVSR}(f) = \sqrt{H_N^2 + H_E^2} / V$.)*
-- Garvey, S., Girard, A.J., Shragge, J., and Yuan, S. (2026, in press).
-  [Ocelot ambient-noise / HVSR companion paper]. *The Leading Edge*.
-  *(Methodology reference for the Ocelot HVSR processing chain.)*
 - Konno, K. and Ohmachi, T. (1998). Ground-motion characteristics
   estimated from spectral ratio between horizontal and vertical
   components of microtremor. *Bulletin of the Seismological Society of
